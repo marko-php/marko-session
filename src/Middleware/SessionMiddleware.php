@@ -12,6 +12,7 @@ use Marko\Routing\Middleware\MiddlewareInterface;
 use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionInterface;
 use Marko\Session\Exceptions\InvalidSessionIdException;
+use Psr\Clock\ClockInterface;
 
 readonly class SessionMiddleware implements MiddlewareInterface
 {
@@ -22,6 +23,7 @@ readonly class SessionMiddleware implements MiddlewareInterface
     public function __construct(
         private SessionInterface $session,
         private SessionConfig $sessionConfig,
+        private ClockInterface $clock,
     ) {}
 
     /**
@@ -101,7 +103,7 @@ readonly class SessionMiddleware implements MiddlewareInterface
             value: $id,
             expires: $this->sessionConfig->expireOnClose()
                 ? null
-                : time() + $this->sessionConfig->lifetime() * self::SECONDS_PER_MINUTE,
+                : $this->clock->now()->getTimestamp() + $this->sessionConfig->lifetime() * self::SECONDS_PER_MINUTE,
             path: $this->sessionConfig->cookiePath(),
             domain: $this->sessionConfig->cookieDomain(),
             secure: $this->sessionConfig->cookieSecure(),
@@ -118,7 +120,7 @@ readonly class SessionMiddleware implements MiddlewareInterface
         return new Cookie(
             name: $this->sessionConfig->cookieName(),
             value: '',
-            expires: time() - self::EXPIRED_COOKIE_OFFSET_SECONDS,
+            expires: $this->clock->now()->getTimestamp() - self::EXPIRED_COOKIE_OFFSET_SECONDS,
             path: $this->sessionConfig->cookiePath(),
             domain: $this->sessionConfig->cookieDomain(),
             secure: $this->sessionConfig->cookieSecure(),

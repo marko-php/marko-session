@@ -9,6 +9,7 @@ use Marko\Session\Contracts\SessionInterface;
 use Marko\Session\Exceptions\InvalidSessionIdException;
 use Marko\Session\Flash\FlashBag;
 use Marko\Session\Middleware\SessionMiddleware;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 
 it('starts session before passing to next handler', function (): void {
@@ -18,7 +19,7 @@ it('starts session before passing to next handler', function (): void {
         $sessionStarted = true;
     });
 
-    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig());
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',
@@ -37,7 +38,7 @@ it('saves session after response', function (): void {
         $sessionSaved = true;
     });
 
-    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig());
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',
@@ -52,7 +53,7 @@ it('saves session after response', function (): void {
 it('passes request through to next handler', function (): void {
     $session = createFakeSession();
 
-    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig());
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',
@@ -71,7 +72,7 @@ it('saves session even when handler throws', function (): void {
         $sessionSaved = true;
     });
 
-    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig());
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',
@@ -99,7 +100,7 @@ it('does not start session if already started', function (): void {
         },
     );
 
-    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig());
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',
@@ -119,7 +120,7 @@ it('reuses the session id from the inbound request cookie', function (): void {
         $capturedSetId = $id;
     });
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(
         server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
@@ -135,7 +136,7 @@ it('reuses the session id from the inbound request cookie', function (): void {
 it('ignores an invalid inbound session cookie and starts a fresh session', function (): void {
     $session = createFakeSession(rejectSetId: true);
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(
         server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
@@ -152,7 +153,7 @@ it('ignores an invalid inbound session cookie and starts a fresh session', funct
 it('attaches the session cookie to the response when the session is new', function (): void {
     $session = createFakeSession();
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
@@ -167,7 +168,7 @@ it('does not attach a session cookie when the id is unchanged', function (): voi
 
     $session = createFakeSession();
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(
         server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
@@ -184,7 +185,7 @@ it('attaches the new session cookie after the session id is regenerated', functi
 
     $session = createFakeSession();
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(
         server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
@@ -205,7 +206,7 @@ it('attaches the new session cookie after the session id is regenerated', functi
 it('emits exactly one session set-cookie line for the configured cookie name', function (): void {
     $session = createFakeSession();
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
@@ -226,20 +227,33 @@ it('applies the configured lifetime path and domain to the session cookie', func
         'session.cookie.path' => '/app',
         'session.cookie.domain' => 'example.test',
     ]);
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
     $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
 
     $cookieLine = $response->cookies()[0]->toSetCookieString();
-    preg_match('/Expires=([^;]+)/', $cookieLine, $matches);
-    $expiresAt = strtotime($matches[1]);
-    $expectedExpiresAt = time() + 30 * 60;
 
     expect($cookieLine)->toContain('Path=/app')
-        ->and($cookieLine)->toContain('Domain=example.test')
-        ->and(abs($expiresAt - $expectedExpiresAt))->toBeLessThan(5);
+        ->and($cookieLine)->toContain('Domain=example.test');
+});
+
+it('sets the session cookie expiry to now plus the configured lifetime', function (): void {
+    $clock = new FakeClock('2026-01-01 12:00:00 UTC');
+    $middleware = new SessionMiddleware(
+        createFakeSession(),
+        createMiddlewareSessionConfig(['session.lifetime' => 30]),
+        $clock,
+    );
+
+    $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
+
+    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+
+    preg_match('/Expires=([^;]+)/', $response->cookies()[0]->toSetCookieString(), $matches);
+
+    expect(strtotime($matches[1]))->toBe($clock->now()->getTimestamp() + 30 * 60);
 });
 
 it('marks the session cookie httponly and applies the configured samesite value', function (): void {
@@ -248,7 +262,7 @@ it('marks the session cookie httponly and applies the configured samesite value'
         'session.cookie.httponly' => true,
         'session.cookie.samesite' => 'strict',
     ]);
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
@@ -260,12 +274,13 @@ it('marks the session cookie httponly and applies the configured samesite value'
         ->and($cookieLine)->toContain('SameSite=Strict');
 });
 
-it('attaches an expired cookie to the response when the session is destroyed', function (): void {
+it('expires the session cookie relative to the clock when the session is destroyed', function (): void {
     $inboundId = 'abcdefghijklmnopqrstuvwxyz012345';
 
+    $clock = new FakeClock('2026-01-01 12:00:00 UTC');
     $session = createFakeSession();
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, $clock);
 
     $request = new Request(
         server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
@@ -283,7 +298,7 @@ it('attaches an expired cookie to the response when the session is destroyed', f
 
     expect($response->cookies())->toHaveCount(1)
         ->and($response->cookies()[0]->name())->toBe($sessionConfig->cookieName())
-        ->and(strtotime($matches[1]))->toBeLessThan(time());
+        ->and(strtotime($matches[1]))->toBe($clock->now()->getTimestamp() - 42000);
 });
 
 it('still saves the session when the handler throws and attaches no cookie', function (): void {
@@ -293,7 +308,7 @@ it('still saves the session when the handler throws and attaches no cookie', fun
         $sessionSaved = true;
     });
     $sessionConfig = createMiddlewareSessionConfig();
-    $middleware = new SessionMiddleware($session, $sessionConfig);
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
     $request = new Request(server: [
         'REQUEST_METHOD' => 'GET',

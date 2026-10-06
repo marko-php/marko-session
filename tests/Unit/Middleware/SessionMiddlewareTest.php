@@ -871,7 +871,7 @@ function createFakeSession(
     };
 }
 
-it('does not run on unmatched requests, where so bots probing unknown URLs never touch the session store', function (): void {
+it('does not run on unmatched requests, so 404s never touch the session store', function (): void {
     $attributes = new ReflectionClass(SessionMiddleware::class)->getAttributes(RunsOnUnmatched::class);
 
     expect($attributes)->toBe([]);

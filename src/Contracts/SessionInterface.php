@@ -18,6 +18,22 @@ interface SessionInterface
     }
 
     /**
+     * Make the session available for this request without starting it. The
+     * first data access (get(), set(), flash(), ...) then starts it. Until
+     * then the handler is never called. Called by the session middleware for
+     * requests without a session cookie; save(), discard(), destroy() and
+     * a reset end the armed state.
+     */
+    public function arm(): void;
+
+    /**
+     * Whether the session can be used: it is started, or armed to start on
+     * first access. Check this instead of $started to ask "may I use the
+     * session on this request?".
+     */
+    public function isAvailable(): bool;
+
+    /**
      * Get a value from the session.
      */
     public function get(

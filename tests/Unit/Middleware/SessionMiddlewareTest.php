@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Marko\Routing\Attributes\RunsOnUnmatched;
 use Marko\Routing\Http\Request;
 use Marko\Routing\Http\Response;
 use Marko\Session\Config\SessionConfig;
@@ -12,23 +13,107 @@ use Marko\Session\Middleware\SessionMiddleware;
 use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 
-it('starts session before passing to next handler', function (): void {
-    $sessionStarted = false;
+it('starts the session eagerly when the request carries a session cookie', function (): void {
+    $startedBeforeNext = null;
+    $session = createFakeSession();
+    $sessionConfig = createMiddlewareSessionConfig();
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
 
-    $session = createFakeSession(onStart: function () use (&$sessionStarted): void {
-        $sessionStarted = true;
+    $request = new Request(
+        server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+        cookies: [$sessionConfig->cookieName() => 'abcdefghijklmnopqrstuvwxyz012345'],
+    );
+
+    $middleware->handle($request, function (Request $r) use ($session, &$startedBeforeNext): Response {
+        $startedBeforeNext = $session->started;
+
+        return new Response('OK');
     });
 
+    expect($startedBeforeNext)->toBeTrue();
+});
+
+it('arms instead of starting the session when the request has no session cookie', function (): void {
+    $startCount = 0;
+    $state = null;
+    $session = createFakeSession(onStart: function () use (&$startCount): void {
+        $startCount++;
+    });
     $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
 
-    $request = new Request(server: [
-        'REQUEST_METHOD' => 'GET',
-        'REQUEST_URI' => '/',
-    ]);
+    $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
+
+    $middleware->handle($request, function (Request $r) use ($session, &$state): Response {
+        $state = ['started' => $session->started, 'available' => $session->isAvailable()];
+
+        return new Response('OK');
+    });
+
+    expect($state)->toBe(['started' => false, 'available' => true])
+        ->and($startCount)->toBe(0)
+        ->and($session->isAvailable())->toBeFalse();
+});
+
+it('arms instead of starting the session when the inbound session cookie is malformed', function (): void {
+    $startCount = 0;
+    $session = createFakeSession(
+        onStart: function () use (&$startCount): void {
+            $startCount++;
+        },
+        rejectSetId: true,
+    );
+    $sessionConfig = createMiddlewareSessionConfig();
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+    $request = new Request(
+        server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+        cookies: [$sessionConfig->cookieName() => 'not-a-valid-id'],
+    );
 
     $middleware->handle($request, fn (Request $r) => new Response('OK'));
 
-    expect($sessionStarted)->toBeTrue();
+    expect($startCount)->toBe(0);
+});
+
+it('does not re-arm or start a session that is already available', function (): void {
+    $startCount = 0;
+    $session = createFakeSession(onStart: function () use (&$startCount): void {
+        $startCount++;
+    });
+    $session->arm();
+    $sessionConfig = createMiddlewareSessionConfig();
+    $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+    $middleware->handle(
+        new Request(
+            server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+            cookies: [$sessionConfig->cookieName() => 'abcdefghijklmnopqrstuvwxyz012345'],
+        ),
+        fn (Request $r) => new Response('OK'),
+    );
+
+    expect($startCount)->toBe(0)
+        ->and($session->getId())->toBe('');
+});
+
+it('starts an armed session lazily when the request first uses it', function (): void {
+    $startCount = 0;
+    $session = createFakeSession(onStart: function () use (&$startCount): void {
+        $startCount++;
+    });
+    $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
+
+    $middleware->handle(
+        new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+        function (Request $r) use ($session): Response {
+            $session->get('user_id');
+            $session->get('cart');
+
+            return new Response('OK');
+        },
+    );
+
+    expect($startCount)->toBe(1);
 });
 
 it('saves session after response', function (): void {
@@ -145,7 +230,7 @@ it('ignores an invalid inbound session cookie and starts a fresh session', funct
         cookies: [$sessionConfig->cookieName() => 'not-a-valid-id'],
     );
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     expect($response->body())->toBe('OK')
         ->and($session->getId())->not->toBe('not-a-valid-id')
@@ -634,6 +719,8 @@ function createFakeSession(
 
         private bool $modified = false;
 
+        public bool $armed = false;
+
         public function __construct(
             public bool $started,
             private readonly ?Closure $onStart,
@@ -643,6 +730,26 @@ function createFakeSession(
             private readonly ?Closure $onDiscard,
             private readonly bool $rejectOnStart,
         ) {}
+
+        public function arm(): void
+        {
+            $this->armed = true;
+        }
+
+        public function isAvailable(): bool
+        {
+            return $this->started || $this->armed;
+        }
+
+        /**
+         * Mirrors Session: an armed session starts on first data access.
+         */
+        private function startIfArmed(): void
+        {
+            if (!$this->started && $this->armed) {
+                $this->start();
+            }
+        }
 
         public function isModified(): bool
         {
@@ -655,6 +762,7 @@ function createFakeSession(
                 ($this->onDiscard)();
             }
 
+            $this->armed = false;
             $this->started = false;
         }
 
@@ -679,6 +787,7 @@ function createFakeSession(
                 ($this->onSave)();
             }
 
+            $this->armed = false;
             $this->started = false;
         }
 
@@ -686,6 +795,8 @@ function createFakeSession(
             string $key,
             mixed $default = null,
         ): mixed {
+            $this->startIfArmed();
+
             return $default;
         }
 
@@ -693,11 +804,14 @@ function createFakeSession(
             string $key,
             mixed $value,
         ): void {
+            $this->startIfArmed();
             $this->modified = true;
         }
 
         public function has(string $key): bool
         {
+            $this->startIfArmed();
+
             return false;
         }
 
@@ -715,6 +829,7 @@ function createFakeSession(
 
         public function regenerate(bool $deleteOldSession = true): void
         {
+            $this->startIfArmed();
             $this->id = 'regenerated-session-id-1234567890123456';
             $this->modified = true;
         }
@@ -722,6 +837,7 @@ function createFakeSession(
         public function destroy(): void
         {
             $this->id = '';
+            $this->armed = false;
             $this->started = false;
         }
 
@@ -748,7 +864,15 @@ function createFakeSession(
 
         public function flash(): FlashBag
         {
+            $this->startIfArmed();
+
             return new FlashBag([]);
         }
     };
 }
+
+it('does not run on unmatched requests, where so bots probing unknown URLs never touch the session store', function (): void {
+    $attributes = new ReflectionClass(SessionMiddleware::class)->getAttributes(RunsOnUnmatched::class);
+
+    expect($attributes)->toBe([]);
+})->issue(267);

@@ -44,20 +44,33 @@ function createInMemorySessionHandler(): SessionHandlerInterface
         /** @var array<int, string> */
         public array $calls = [];
 
+        /**
+         * Every handler method PHP invoked, in order.
+         *
+         * @var array<int, string>
+         */
+        public array $handlerCalls = [];
+
         public function open(
             string $path,
             string $name,
         ): bool {
+            $this->handlerCalls[] = 'open';
+
             return true;
         }
 
         public function close(): bool
         {
+            $this->handlerCalls[] = 'close';
+
             return true;
         }
 
         public function read(string $id): string|false
         {
+            $this->handlerCalls[] = 'read';
+
             return $this->written[$id] ?? '';
         }
 
@@ -65,6 +78,8 @@ function createInMemorySessionHandler(): SessionHandlerInterface
             string $id,
             string $data,
         ): bool {
+            $this->handlerCalls[] = 'write';
+
             $this->calls[] = 'write';
             $this->written[$id] = $data;
 
@@ -73,6 +88,8 @@ function createInMemorySessionHandler(): SessionHandlerInterface
 
         public function destroy(string $id): bool
         {
+            $this->handlerCalls[] = 'destroy';
+
             unset($this->written[$id]);
 
             return true;
@@ -80,11 +97,15 @@ function createInMemorySessionHandler(): SessionHandlerInterface
 
         public function gc(int $max_lifetime): int|false
         {
+            $this->handlerCalls[] = 'gc';
+
             return 0;
         }
 
         public function validateId(string $id): bool
         {
+            $this->handlerCalls[] = 'validateId';
+
             return isset($this->written[$id]);
         }
 
@@ -92,6 +113,8 @@ function createInMemorySessionHandler(): SessionHandlerInterface
             string $id,
             string $data,
         ): bool {
+            $this->handlerCalls[] = 'updateTimestamp';
+
             $this->calls[] = 'updateTimestamp';
 
             return isset($this->written[$id]);
@@ -436,6 +459,159 @@ describe('strict session ids', function (): void {
         expect($thrown)->toBeInstanceOf(InvalidSessionIdException::class)
             ->and($thrown->getMessage())->not->toContain($tamperedId)
             ->and($thrown->getContext())->not->toContain($tamperedId);
+    });
+});
+
+describe('lazy start', function (): void {
+    it('is not available before it is armed or started', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and($session->started)->toBeFalse();
+    });
+
+    it('is available but not started after arm', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+
+        $session->arm();
+
+        expect($session->isAvailable())->toBeTrue()
+            ->and($session->started)->toBeFalse();
+    });
+
+    it('makes no handler call when armed', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+
+        $session->arm();
+        $session->discard();
+
+        expect($handler->handlerCalls)->toBe([]);
+    });
+
+    it('starts on first get when armed', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $session->arm();
+
+        try {
+            expect($session->get('missing', 'default'))->toBe('default')
+                ->and($session->started)->toBeTrue()
+                ->and($handler->handlerCalls)->toContain('read');
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('starts on first set when armed', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+
+        try {
+            $session->set('key', 'value');
+
+            expect($session->started)->toBeTrue()
+                ->and($session->isModified())->toBeTrue()
+                ->and($session->get('key'))->toBe('value');
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('starts on first flash access when armed', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+
+        try {
+            $session->flash()->add('success', 'Saved');
+
+            expect($session->started)->toBeTrue()
+                ->and($session->isModified())->toBeTrue();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('still throws SessionNotStartedException when accessed without being armed', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+
+        expect(fn () => $session->get('key'))->toThrow(SessionNotStartedException::class)
+            ->and(fn () => $session->flash())->toThrow(SessionNotStartedException::class)
+            ->and($handler->handlerCalls)->toBe([]);
+    });
+
+    it('is no longer available after an armed session is saved', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+
+        $session->save();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and(fn () => $session->get('key'))->toThrow(SessionNotStartedException::class);
+    });
+
+    it('is no longer available after an armed session is discarded', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+
+        $session->discard();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and(fn () => $session->get('key'))->toThrow(SessionNotStartedException::class);
+    });
+
+    it('clears the armed state on reset', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+
+        $session->reset();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and(fn () => $session->get('key'))->toThrow(SessionNotStartedException::class);
+    });
+
+    it('is no longer available after a lazily started session is saved', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+        $session->set('key', 'value');
+
+        $session->save();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and(fn () => $session->get('key'))->toThrow(SessionNotStartedException::class);
+    });
+
+    it('is no longer available after a lazily started session is destroyed', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->arm();
+        $session->set('key', 'value');
+
+        $session->destroy();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and($session->started)->toBeFalse();
+    });
+
+    it('disarms without a handler call when destroyed while armed but not started', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $session->arm();
+
+        $session->destroy();
+
+        expect($session->isAvailable())->toBeFalse()
+            ->and($handler->handlerCalls)->toBe([]);
+    });
+
+    it('returns an empty id without starting when armed', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $session->arm();
+
+        expect($session->getId())->toBe('')
+            ->and($session->started)->toBeFalse()
+            ->and($handler->handlerCalls)->toBe([]);
     });
 });
 

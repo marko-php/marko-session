@@ -27,6 +27,10 @@ readonly class SessionMiddleware implements MiddlewareInterface
     ) {}
 
     /**
+     * Starting is lazy for requests without a usable session cookie: the
+     * session is armed and starts on first access, so cookieless traffic
+     * that never touches it makes no handler call (no read, no GC).
+     *
      * Persistence is lazy: the session is saved (and its cookie sent) only
      * when the request resumed an existing session from its cookie or
      * modified the session. A session nobody wrote to is discarded, so
@@ -47,9 +51,8 @@ readonly class SessionMiddleware implements MiddlewareInterface
     ): Response {
         $inboundId = $this->inboundSessionId($request);
 
-        if (!$this->session->started) {
-            $this->seedSessionId($inboundId);
-            $this->session->start();
+        if (!$this->session->isAvailable()) {
+            $this->prepare($inboundId);
         }
 
         $resumed = $inboundId !== null && $this->session->getId() === $inboundId;
@@ -96,19 +99,40 @@ readonly class SessionMiddleware implements MiddlewareInterface
         return is_string($value) && $value !== '' ? $value : null;
     }
 
-    private function seedSessionId(
+    /**
+     * Start the session eagerly when the request carries a well-formed
+     * session cookie, so a resumed session is read before the controller runs
+     * and its expiry slides on every request. Without one there is nothing to
+     * resume: the session is only armed, and starts on first access. A
+     * request that never touches it makes no handler call at all.
+     */
+    private function prepare(
         ?string $inboundId,
     ): void {
-        if ($inboundId === null) {
+        if ($inboundId === null || !$this->seedSessionId($inboundId)) {
+            $this->session->arm();
+
             return;
         }
 
+        $this->session->start();
+    }
+
+    /**
+     * Returns whether the inbound id was accepted.
+     */
+    private function seedSessionId(
+        string $inboundId,
+    ): bool {
         try {
             $this->session->setId($inboundId);
         } catch (InvalidSessionIdException) {
             // Attacker-controlled cookie value — ignore and fall through to a fresh session
             // rather than surfacing a 500 for a tampered or malformed inbound cookie.
+            return false;
         }
+
+        return true;
     }
 
     /**

@@ -414,7 +414,7 @@ describe('lazy persistence', function (): void {
             ->and($response->cookies())->toBeEmpty();
     });
 
-    it('treats an invalid inbound session cookie as no cookie and discards an untouched session', function (): void {
+    it('discards an untouched session and expires a malformed inbound session cookie', function (): void {
         $saved = false;
 
         $session = createFakeSession(
@@ -435,7 +435,8 @@ describe('lazy persistence', function (): void {
         );
 
         expect($saved)->toBeFalse()
-            ->and($response->cookies())->toBeEmpty();
+            ->and($response->cookies())->toHaveCount(1)
+            ->and($response->cookies()[0]->value())->toBe('');
     });
 
     it('emits no cookie at all when a session the client never had is destroyed', function (): void {
@@ -475,6 +476,107 @@ describe('lazy persistence', function (): void {
         }
 
         expect($discarded)->toBeTrue();
+    });
+});
+
+describe('strict session ids', function (): void {
+    it(
+        'does not write and sends an expired cookie for a well-formed cookie the store does not know',
+        function (): void {
+            $saved = false;
+            $clock = new FakeClock('2026-01-01 12:00:00 UTC');
+
+            $session = createFakeSession(
+                onSave: function () use (&$saved): void {
+                    $saved = true;
+                },
+                rejectOnStart: true,
+            );
+            $sessionConfig = createMiddlewareSessionConfig();
+            $middleware = new SessionMiddleware($session, $sessionConfig, $clock);
+
+            $response = $middleware->handle(
+                new Request(
+                    server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                    cookies: [$sessionConfig->cookieName() => str_repeat('a', 40)],
+                ),
+                fn (Request $r) => new Response('OK'),
+            );
+
+            $cookie = $response->cookies()[0];
+            preg_match('/Expires=([^;]+)/', $cookie->toSetCookieString(), $matches);
+
+            expect($saved)->toBeFalse()
+                ->and($response->cookies())->toHaveCount(1)
+                ->and($cookie->name())->toBe($sessionConfig->cookieName())
+                ->and($cookie->value())->toBe('')
+                ->and(strtotime($matches[1]))->toBeLessThan($clock->now()->getTimestamp());
+        },
+    );
+
+    it('keeps the session unmodified for a rejected cookie', function (): void {
+        $session = createFakeSession(rejectOnStart: true);
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+        $modifiedDuringRequest = null;
+
+        $middleware->handle(
+            new Request(
+                server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                cookies: [$sessionConfig->cookieName() => str_repeat('a', 40)],
+            ),
+            function (Request $r) use ($session, &$modifiedDuringRequest): Response {
+                $modifiedDuringRequest = $session->isModified();
+
+                return new Response('OK');
+            },
+        );
+
+        expect($modifiedDuringRequest)->toBeFalse()
+            ->and($session->getId())->not->toBe(str_repeat('a', 40));
+    });
+
+    it('sends an expired cookie for a malformed session cookie', function (): void {
+        $session = createFakeSession(rejectSetId: true);
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(
+                server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                cookies: [$sessionConfig->cookieName() => 'not-a-valid-id'],
+            ),
+            fn (Request $r) => new Response('OK'),
+        );
+
+        expect($response->cookies())->toHaveCount(1)
+            ->and($response->cookies()[0]->name())->toBe($sessionConfig->cookieName())
+            ->and($response->cookies()[0]->value())->toBe('');
+    });
+
+    it('replaces a rejected cookie with a fresh one when the request writes to the session', function (): void {
+        $saved = false;
+
+        $session = createFakeSession(
+            onSave: function () use (&$saved): void {
+                $saved = true;
+            },
+            rejectOnStart: true,
+        );
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(
+                server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                cookies: [$sessionConfig->cookieName() => str_repeat('a', 40)],
+            ),
+            writingHandler($session),
+        );
+
+        expect($saved)->toBeTrue()
+            ->and($response->cookies())->toHaveCount(1)
+            ->and($response->cookies()[0]->value())->toBe('generated-session-id-1234567890123456');
     });
 });
 
@@ -524,8 +626,9 @@ function createFakeSession(
     bool $rejectSetId = false,
     ?Closure $onSetId = null,
     ?Closure $onDiscard = null,
+    bool $rejectOnStart = false,
 ): SessionInterface {
-    return new class ($started, $onStart, $onSave, $rejectSetId, $onSetId, $onDiscard) implements SessionInterface
+    return new class ($started, $onStart, $onSave, $rejectSetId, $onSetId, $onDiscard, $rejectOnStart) implements SessionInterface
     {
         private string $id = '';
 
@@ -538,6 +641,7 @@ function createFakeSession(
             private readonly bool $rejectSetId,
             private readonly ?Closure $onSetId,
             private readonly ?Closure $onDiscard,
+            private readonly bool $rejectOnStart,
         ) {}
 
         public function isModified(): bool
@@ -560,7 +664,9 @@ function createFakeSession(
                 ($this->onStart)();
             }
 
-            if ($this->id === '') {
+            // rejectOnStart mimics PHP strict mode with a handler whose
+            // validateId() does not know the seeded id: it is replaced.
+            if ($this->id === '' || $this->rejectOnStart) {
                 $this->id = 'generated-session-id-1234567890123456';
             }
 

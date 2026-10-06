@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
+use Marko\Session\Exceptions\InvalidSessionIdException;
 use Marko\Session\Exceptions\SessionNotStartedException;
 use Marko\Session\Session;
 use Marko\Testing\Fake\FakeConfigRepository;
@@ -40,6 +41,9 @@ function createInMemorySessionHandler(): SessionHandlerInterface
         /** @var array<string, string> */
         public array $written = [];
 
+        /** @var array<int, string> */
+        public array $calls = [];
+
         public function open(
             string $path,
             string $name,
@@ -61,6 +65,7 @@ function createInMemorySessionHandler(): SessionHandlerInterface
             string $id,
             string $data,
         ): bool {
+            $this->calls[] = 'write';
             $this->written[$id] = $data;
 
             return true;
@@ -76,6 +81,20 @@ function createInMemorySessionHandler(): SessionHandlerInterface
         public function gc(int $max_lifetime): int|false
         {
             return 0;
+        }
+
+        public function validateId(string $id): bool
+        {
+            return isset($this->written[$id]);
+        }
+
+        public function updateTimestamp(
+            string $id,
+            string $data,
+        ): bool {
+            $this->calls[] = 'updateTimestamp';
+
+            return isset($this->written[$id]);
         }
     };
 }
@@ -313,3 +332,120 @@ describe('discard', function (): void {
         expect($session->started)->toBeFalse();
     });
 });
+
+describe('strict session ids', function (): void {
+    it('enables lazy writes so unchanged sessions are not rewritten', function (): void {
+        $previous = ini_get('session.lazy_write');
+        ini_set('session.lazy_write', '0');
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+
+        try {
+            $session->start();
+
+            expect(ini_get('session.lazy_write'))->toBe('1');
+        } finally {
+            $session->discard();
+            ini_set('session.lazy_write', (string) $previous);
+        }
+    });
+
+    it('requires session handlers to validate ids and update timestamps', function (): void {
+        expect(is_subclass_of(SessionHandlerInterface::class, SessionUpdateTimestampHandlerInterface::class))
+            ->toBeTrue();
+    });
+
+    it('discards a well-formed session id the handler does not know and starts with a fresh id', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $unknownId = str_repeat('a', 40);
+
+        $session->setId($unknownId);
+        $session->start();
+
+        try {
+            expect($session->getId())->not->toBe($unknownId)
+                ->and($session->getId())->not->toBeEmpty()
+                ->and($session->isModified())->toBeFalse()
+                ->and($handler->written)->not->toHaveKey($unknownId);
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('resumes a session id the handler knows', function (): void {
+        $handler = createInMemorySessionHandler();
+        $knownId = str_repeat('b', 40);
+        $handler->written[$knownId] = 'user_id|i:42;';
+        $session = new Session($handler, createTestSessionConfig());
+
+        $session->setId($knownId);
+        $session->start();
+
+        try {
+            expect($session->getId())->toBe($knownId)
+                ->and($session->get('user_id'))->toBe(42);
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it(
+        'refreshes the timestamp instead of rewriting the payload when a resumed session is saved unchanged',
+        function (): void {
+            $handler = createInMemorySessionHandler();
+            $knownId = str_repeat('c', 40);
+            $handler->written[$knownId] = 'user_id|i:42;';
+            $session = new Session($handler, createTestSessionConfig());
+
+            $session->setId($knownId);
+            $session->start();
+            $session->get('user_id');
+            $session->save();
+
+            expect($handler->calls)->toBe(['updateTimestamp'])
+                ->and($handler->written[$knownId])->toBe('user_id|i:42;');
+        },
+    );
+
+    it(
+        'writes the payload under the new id when a resumed session is regenerated without other changes',
+        function (): void {
+            $handler = createInMemorySessionHandler();
+            $knownId = str_repeat('d', 40);
+            $handler->written[$knownId] = 'user_id|i:42;';
+            $session = new Session($handler, createTestSessionConfig());
+
+            $session->setId($knownId);
+            $session->start();
+            $session->regenerate();
+            $newId = $session->getId();
+            $session->save();
+
+            expect($newId)->not->toBe($knownId)
+                ->and($handler->written)->not->toHaveKey($knownId)
+                ->and($handler->written[$newId] ?? null)->toBe('user_id|i:42;');
+        },
+    );
+
+    it('does not include the rejected session id in the invalid session id exception', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $tamperedId = 'attacker<script>chosen';
+
+        $thrown = catchInvalidSessionId(fn () => $session->setId($tamperedId));
+
+        expect($thrown)->toBeInstanceOf(InvalidSessionIdException::class)
+            ->and($thrown->getMessage())->not->toContain($tamperedId)
+            ->and($thrown->getContext())->not->toContain($tamperedId);
+    });
+});
+
+function catchInvalidSessionId(Closure $callback): ?InvalidSessionIdException
+{
+    try {
+        $callback();
+    } catch (InvalidSessionIdException $exception) {
+        return $exception;
+    }
+
+    return null;
+}

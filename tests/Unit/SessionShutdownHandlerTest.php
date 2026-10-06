@@ -67,6 +67,18 @@ it('registers the session save handler shutdown function only once', function ()
         {
             return 0;
         }
+
+        public function validateId(string $id): bool
+        {
+            return isset($this->written[$id]);
+        }
+
+        public function updateTimestamp(
+            string $id,
+            string $data,
+        ): bool {
+            return isset($this->written[$id]);
+        }
     };
 
     $session = new Session($handler, $sessionConfig);

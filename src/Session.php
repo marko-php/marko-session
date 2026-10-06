@@ -268,7 +268,12 @@ class Session implements SessionInterface, ResettableInterface
         ini_set('session.gc_maxlifetime', (string) ($this->config->lifetime() * 60));
         ini_set('session.gc_probability', (string) $this->config->gcProbability());
         ini_set('session.gc_divisor', (string) $this->config->gcDivisor());
+        // Strict mode makes PHP ask the handler's validateId() before resuming
+        // an inbound id, so an unknown or expired id gets a fresh one instead
+        // of being adopted. Lazy writes make PHP call updateTimestamp()
+        // rather than write() when the data is unchanged.
         ini_set('session.use_strict_mode', '1');
+        ini_set('session.lazy_write', '1');
         ini_set('session.use_cookies', '0');
         ini_set('session.use_only_cookies', '1');
 

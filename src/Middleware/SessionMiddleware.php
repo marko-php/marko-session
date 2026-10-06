@@ -33,6 +33,12 @@ readonly class SessionMiddleware implements MiddlewareInterface
      * cookieless traffic that never touches the session (bots, health
      * checks, static pages) creates no stored session and gets no cookie.
      *
+     * A session is resumed only when the store knows the inbound id: under
+     * strict mode PHP asks the handler's validateId() and replaces an unknown
+     * or expired id with a fresh one. A cookie that resumed nothing (unknown,
+     * expired or malformed) is expired on the response unless a new session
+     * was persisted in its place, so the client stops replaying it.
+     *
      * @throws CookieException
      */
     public function handle(
@@ -56,7 +62,9 @@ readonly class SessionMiddleware implements MiddlewareInterface
         }
 
         if (!$persisted) {
-            return $response;
+            return $inboundId !== null && !$resumed
+                ? $response->withCookie($this->expiredCookie())
+                : $response;
         }
 
         return $this->attachSessionCookie($response, $inboundId);

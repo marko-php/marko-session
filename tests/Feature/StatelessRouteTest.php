@@ -76,6 +76,22 @@ class RecordingSessionHandler implements SessionHandlerInterface
 
         return 0;
     }
+
+    public function validateId(string $id): bool
+    {
+        $this->calls[] = 'validateId';
+
+        return false;
+    }
+
+    public function updateTimestamp(
+        string $id,
+        string $data,
+    ): bool {
+        $this->calls[] = 'updateTimestamp';
+
+        return true;
+    }
 }
 
 readonly class StatelessApiController

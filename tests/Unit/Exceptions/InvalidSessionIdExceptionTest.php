@@ -17,10 +17,11 @@ it('creates exception with message', function () {
     expect($exception->getMessage())->toBe('Invalid session ID format');
 });
 
-it('includes session ID in context', function () {
+it('reports the length of the session ID but never the ID itself', function () {
     $exception = InvalidSessionIdException::forId('my-invalid-id');
 
-    expect($exception->getContext())->toBe('Provided session ID: my-invalid-id');
+    expect($exception->getContext())->toBe('Provided session ID length: 13 characters')
+        ->and($exception->getContext())->not->toContain('my-invalid-id');
 });
 
 it('includes suggestion', function () {

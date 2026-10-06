@@ -12,7 +12,7 @@ use Marko\Session\Config\SessionConfig;
 use Marko\Session\Contracts\SessionHandlerInterface;
 
 /** @noinspection PhpUnused */
-#[Command(name: 'session:gc', description: 'Run session garbage collection')]
+#[Command(name: 'session:gc', description: 'Run session garbage collection', destructive: true)]
 readonly class GarbageCollectCommand implements CommandInterface
 {
     public function __construct(

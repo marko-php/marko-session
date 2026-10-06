@@ -192,3 +192,124 @@ it('resumes the same session when a second request arrives with the same cookie'
         $session->save();
     }
 });
+
+describe('modification tracking', function (): void {
+    it('reports an untouched started session as not modified', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+
+        try {
+            expect($session->isModified())->toBeFalse();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('reports a session that was only read as not modified', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+
+        try {
+            $session->get('user_id');
+            $session->has('user_id');
+            $session->flash()->peek('success');
+
+            expect($session->isModified())->toBeFalse();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('reports the session modified after a value is set', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+
+        try {
+            $session->set('key', 'value');
+
+            expect($session->isModified())->toBeTrue();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('reports the session modified after a flash message is added', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+
+        try {
+            $session->flash()->add('success', 'Saved');
+
+            expect($session->isModified())->toBeTrue();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('reports the session modified after the id is regenerated', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+
+        try {
+            $session->regenerate();
+
+            expect($session->isModified())->toBeTrue();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('reports a session that is not started as not modified', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+
+        expect($session->isModified())->toBeFalse();
+    });
+});
+
+describe('discard', function (): void {
+    it('does not write to the handler when the session is discarded', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $session->start();
+        $session->set('key', 'value');
+
+        $session->discard();
+
+        expect($handler->written)->toBeEmpty()
+            ->and($session->started)->toBeFalse();
+    });
+
+    it('writes to the handler when the session is saved', function (): void {
+        $handler = createInMemorySessionHandler();
+        $session = new Session($handler, createTestSessionConfig());
+        $session->start();
+        $session->set('key', 'value');
+
+        $session->save();
+
+        expect($handler->written)->toHaveKey($session->getId());
+    });
+
+    it('can start a fresh session after a discard in the same process', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+        $session->start();
+        $session->discard();
+        $session->reset();
+
+        $session->start();
+
+        try {
+            expect($session->started)->toBeTrue();
+        } finally {
+            $session->discard();
+        }
+    });
+
+    it('does nothing when discarding a session that is not started', function (): void {
+        $session = new Session(createInMemorySessionHandler(), createTestSessionConfig());
+
+        $session->discard();
+
+        expect($session->started)->toBeFalse();
+    });
+});

@@ -29,6 +29,15 @@ class Session implements SessionInterface, ResettableInterface
      */
     private array $data = [];
 
+    /**
+     * Snapshot of the data loaded by start(), compared by isModified().
+     *
+     * @var array<string, mixed>
+     */
+    private array $loadedData = [];
+
+    private string $loadedId = '';
+
     public function __construct(
         private readonly SessionHandlerInterface $handler,
         private readonly SessionConfig $config,
@@ -70,8 +79,16 @@ class Session implements SessionInterface, ResettableInterface
 
         $this->id = session_id();
         $this->data = $_SESSION ?? [];
+        $this->loadedData = $this->data;
+        $this->loadedId = $this->id;
         $this->flashBag = new FlashBag($this->data);
         $this->started = true;
+    }
+
+    public function isModified(): bool
+    {
+        return $this->started
+            && ($this->data !== $this->loadedData || $this->id !== $this->loadedId);
     }
 
     /**
@@ -225,11 +242,23 @@ class Session implements SessionInterface, ResettableInterface
         $this->started = false;
     }
 
+    public function discard(): void
+    {
+        if (!$this->started) {
+            return;
+        }
+
+        session_abort();
+        $this->started = false;
+    }
+
     #[Override]
     public function reset(): void
     {
         $this->id = '';
         $this->data = [];
+        $this->loadedData = [];
+        $this->loadedId = '';
         $this->flashBag = null;
     }
 

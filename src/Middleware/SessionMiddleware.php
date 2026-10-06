@@ -27,6 +27,12 @@ readonly class SessionMiddleware implements MiddlewareInterface
     ) {}
 
     /**
+     * Persistence is lazy: the session is saved (and its cookie sent) only
+     * when the request resumed an existing session from its cookie or
+     * modified the session. A session nobody wrote to is discarded, so
+     * cookieless traffic that never touches the session (bots, health
+     * checks, static pages) creates no stored session and gets no cookie.
+     *
      * @throws CookieException
      */
     public function handle(
@@ -40,13 +46,38 @@ readonly class SessionMiddleware implements MiddlewareInterface
             $this->session->start();
         }
 
+        $resumed = $inboundId !== null && $this->session->getId() === $inboundId;
+        $persisted = false;
+
         try {
             $response = $next($request);
         } finally {
-            $this->session->save();
+            $persisted = $this->close($resumed);
+        }
+
+        if (!$persisted) {
+            return $response;
         }
 
         return $this->attachSessionCookie($response, $inboundId);
+    }
+
+    /**
+     * Save the session when it was resumed or modified, otherwise discard it.
+     * Returns whether it was saved.
+     */
+    private function close(
+        bool $resumed,
+    ): bool {
+        if (!$resumed && !$this->session->isModified()) {
+            $this->session->discard();
+
+            return false;
+        }
+
+        $this->session->save();
+
+        return true;
     }
 
     private function inboundSessionId(

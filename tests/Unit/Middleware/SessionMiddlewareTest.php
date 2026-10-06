@@ -45,7 +45,7 @@ it('saves session after response', function (): void {
         'REQUEST_URI' => '/',
     ]);
 
-    $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $middleware->handle($request, writingHandler($session));
 
     expect($sessionSaved)->toBeTrue();
 });
@@ -80,7 +80,9 @@ it('saves session even when handler throws', function (): void {
     ]);
 
     try {
-        $middleware->handle($request, function () {
+        $middleware->handle($request, function () use ($session) {
+            $session->set('key', 'value');
+
             throw new RuntimeException('handler error');
         });
     } catch (RuntimeException) {
@@ -157,7 +159,7 @@ it('attaches the session cookie to the response when the session is new', functi
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     expect($response->cookies())->toHaveCount(1)
         ->and($response->cookies()[0]->name())->toBe($sessionConfig->cookieName());
@@ -210,7 +212,7 @@ it('emits exactly one session set-cookie line for the configured cookie name', f
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     $setCookieLines = array_values(array_filter(
         $response->headerLines(),
@@ -231,7 +233,7 @@ it('applies the configured lifetime path and domain to the session cookie', func
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     $cookieLine = $response->cookies()[0]->toSetCookieString();
 
@@ -241,15 +243,16 @@ it('applies the configured lifetime path and domain to the session cookie', func
 
 it('sets the session cookie expiry to now plus the configured lifetime', function (): void {
     $clock = new FakeClock('2026-01-01 12:00:00 UTC');
+    $session = createFakeSession();
     $middleware = new SessionMiddleware(
-        createFakeSession(),
+        $session,
         createMiddlewareSessionConfig(['session.lifetime' => 30]),
         $clock,
     );
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     preg_match('/Expires=([^;]+)/', $response->cookies()[0]->toSetCookieString(), $matches);
 
@@ -266,7 +269,7 @@ it('marks the session cookie httponly and applies the configured samesite value'
 
     $request = new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']);
 
-    $response = $middleware->handle($request, fn (Request $r) => new Response('OK'));
+    $response = $middleware->handle($request, writingHandler($session));
 
     $cookieLine = $response->cookies()[0]->toSetCookieString();
 
@@ -318,7 +321,9 @@ it('still saves the session when the handler throws and attaches no cookie', fun
     $thrown = null;
 
     try {
-        $middleware->handle($request, function () {
+        $middleware->handle($request, function () use ($session) {
+            $session->set('key', 'value');
+
             throw new RuntimeException('handler error');
         });
     } catch (RuntimeException $exception) {
@@ -328,6 +333,162 @@ it('still saves the session when the handler throws and attaches no cookie', fun
     expect($thrown)->toBeInstanceOf(RuntimeException::class)
         ->and($sessionSaved)->toBeTrue();
 });
+
+describe('lazy persistence', function (): void {
+    it('discards an untouched new session without saving it', function (): void {
+        $saved = false;
+        $discarded = false;
+
+        $session = createFakeSession(
+            onSave: function () use (&$saved): void {
+                $saved = true;
+            },
+            onDiscard: function () use (&$discarded): void {
+                $discarded = true;
+            },
+        );
+        $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
+
+        $middleware->handle(
+            new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+            fn (Request $r) => new Response('OK'),
+        );
+
+        expect($saved)->toBeFalse()
+            ->and($discarded)->toBeTrue();
+    });
+
+    it('sets no session cookie when a new session is never modified', function (): void {
+        $session = createFakeSession();
+        $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+            function (Request $r) use ($session): Response {
+                $session->get('user_id');
+
+                return new Response('OK');
+            },
+        );
+
+        expect($response->cookies())->toBeEmpty();
+    });
+
+    it('saves a new session and attaches the cookie once it is written to', function (): void {
+        $saved = false;
+
+        $session = createFakeSession(onSave: function () use (&$saved): void {
+            $saved = true;
+        });
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+            writingHandler($session),
+        );
+
+        expect($saved)->toBeTrue()
+            ->and($response->cookies())->toHaveCount(1)
+            ->and($response->cookies()[0]->name())->toBe($sessionConfig->cookieName());
+    });
+
+    it('saves an existing session on every request even when unmodified', function (): void {
+        $saved = false;
+
+        $session = createFakeSession(onSave: function () use (&$saved): void {
+            $saved = true;
+        });
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(
+                server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                cookies: [$sessionConfig->cookieName() => 'abcdefghijklmnopqrstuvwxyz012345'],
+            ),
+            fn (Request $r) => new Response('OK'),
+        );
+
+        expect($saved)->toBeTrue()
+            ->and($response->cookies())->toBeEmpty();
+    });
+
+    it('treats an invalid inbound session cookie as no cookie and discards an untouched session', function (): void {
+        $saved = false;
+
+        $session = createFakeSession(
+            onSave: function () use (&$saved): void {
+                $saved = true;
+            },
+            rejectSetId: true,
+        );
+        $sessionConfig = createMiddlewareSessionConfig();
+        $middleware = new SessionMiddleware($session, $sessionConfig, new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(
+                server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/'],
+                cookies: [$sessionConfig->cookieName() => 'not-a-valid-id'],
+            ),
+            fn (Request $r) => new Response('OK'),
+        );
+
+        expect($saved)->toBeFalse()
+            ->and($response->cookies())->toBeEmpty();
+    });
+
+    it('emits no cookie at all when a session the client never had is destroyed', function (): void {
+        $session = createFakeSession();
+        $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
+
+        $response = $middleware->handle(
+            new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+            function (Request $r) use ($session): Response {
+                $session->set('key', 'value');
+                $session->destroy();
+
+                return new Response('OK');
+            },
+        );
+
+        expect($response->cookies())->toBeEmpty();
+    });
+
+    it('still discards an untouched new session when the handler throws', function (): void {
+        $discarded = false;
+
+        $session = createFakeSession(onDiscard: function () use (&$discarded): void {
+            $discarded = true;
+        });
+        $middleware = new SessionMiddleware($session, createMiddlewareSessionConfig(), new FakeClock());
+
+        try {
+            $middleware->handle(
+                new Request(server: ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/']),
+                function (): never {
+                    throw new RuntimeException('handler error');
+                },
+            );
+        } catch (RuntimeException) {
+            // Expected
+        }
+
+        expect($discarded)->toBeTrue();
+    });
+});
+
+/**
+ * A handler that writes to the session, so the middleware persists it.
+ */
+function writingHandler(SessionInterface $session): Closure
+{
+    return function (Request $r) use ($session): Response {
+        $session->set('key', 'value');
+
+        return new Response('OK');
+    };
+}
 
 /**
  * Create a SessionConfig backed by a FakeConfigRepository for middleware tests.
@@ -362,10 +523,13 @@ function createFakeSession(
     ?Closure $onSave = null,
     bool $rejectSetId = false,
     ?Closure $onSetId = null,
+    ?Closure $onDiscard = null,
 ): SessionInterface {
-    return new class ($started, $onStart, $onSave, $rejectSetId, $onSetId) implements SessionInterface
+    return new class ($started, $onStart, $onSave, $rejectSetId, $onSetId, $onDiscard) implements SessionInterface
     {
         private string $id = '';
+
+        private bool $modified = false;
 
         public function __construct(
             public bool $started,
@@ -373,7 +537,22 @@ function createFakeSession(
             private readonly ?Closure $onSave,
             private readonly bool $rejectSetId,
             private readonly ?Closure $onSetId,
+            private readonly ?Closure $onDiscard,
         ) {}
+
+        public function isModified(): bool
+        {
+            return $this->started && $this->modified;
+        }
+
+        public function discard(): void
+        {
+            if ($this->onDiscard !== null) {
+                ($this->onDiscard)();
+            }
+
+            $this->started = false;
+        }
 
         public function start(): void
         {
@@ -407,7 +586,9 @@ function createFakeSession(
         public function set(
             string $key,
             mixed $value,
-        ): void {}
+        ): void {
+            $this->modified = true;
+        }
 
         public function has(string $key): bool
         {
@@ -429,6 +610,7 @@ function createFakeSession(
         public function regenerate(bool $deleteOldSession = true): void
         {
             $this->id = 'regenerated-session-id-1234567890123456';
+            $this->modified = true;
         }
 
         public function destroy(): void

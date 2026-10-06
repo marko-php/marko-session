@@ -86,4 +86,16 @@ interface SessionInterface
      * Save session data and close.
      */
     public function save(): void;
+
+    /**
+     * Whether the session data or id changed since start(). Reading never
+     * counts as a modification.
+     */
+    public function isModified(): bool;
+
+    /**
+     * Close the session without persisting anything: no handler write, so a
+     * session nobody used leaves no stored record behind.
+     */
+    public function discard(): void;
 }
